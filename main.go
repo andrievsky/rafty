@@ -1,70 +1,108 @@
 package main
 
 import (
-	"fmt"
 	"context"
-	"time"
+	"fmt"
 	"sync/atomic"
+	"time"
 )
 
 func main() {
 	fmt.Println("Lets RAFT!")
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
-	config := Config{}
-	client := NewClient()
+	config := Config{Nodes: []NodeId{1, 2}}
+	transport := NewTransport(config)
+	for _, nodeId := range config.Nodes {
+		node := NewNode(ctx, nodeId, transport)
+		go func() {
+			err := node.Run()
+			if err != nil {
+				log(node, "terminated with error %w", err)
+				return
+			}
+			log(node, "terminated")
 
-	node := NewNode(ctx, 1, client, config)
+		}()
 
-	go func() {
-		err := node.Run()
-		if err != nil {
-			log(node, "terminated with error %w", err)
-			return
-		}
-		log(node, "terminated")
-		
-	}()
+	}
 
-	client.Write(Message("hello peer!"))
+	transport.Write(Message{
+		Ping,
+		Term{1, 0},
+		1,
+		2,
+		nil,
+	})
 
-	time.Sleep(1 * time.Second)
+	time.Sleep(10 * time.Second)
 	cancel()
 	time.Sleep(3 * time.Second)
 }
 
+type MessageKind int
+
+const (
+	VoteRequest MessageKind = iota
+	VoteResponse
+	NewTerm
+	Ping
+	Pong
+)
+
+type Term struct {
+	Id     int
+	Leader NodeId
+}
+
+type Message struct {
+	Kind     MessageKind
+	Term     Term
+	Sender   NodeId
+	Reciever NodeId
+	Payload  any
+}
+
 type Config struct {
-	
+	Nodes []NodeId
 }
 
-type Client struct {
-	Channel chan Message	
+type Transport struct {
+	Config   Config
+	Channels map[NodeId]chan Message
 }
 
-type Message string
-
-func NewClient() *Client {
-	return &Client{make(chan Message)}
+func NewTransport(config Config) *Transport {
+	channels := make(map[NodeId]chan Message)
+	for _, nodeId := range config.Nodes {
+		channels[nodeId] = make(chan Message)
+	}
+	return &Transport{config, channels}
 }
 
-func (client *Client) Read() <-chan Message {
-	return client.Channel
+func (transport *Transport) Write(msg Message) {
+	transport.Channels[msg.Reciever] <- msg
 }
 
-func (client *Client) Write(msg Message) {
-	client.Channel <- msg
+func (transport *Transport) Read(nodeId NodeId) <-chan Message {
+	return transport.Channels[nodeId]
 }
+
+type NodeId int
+
+const System = NodeId(0)
 
 type Node struct {
-	Ctx context.Context
-	Id int
-	Client *Client
-	Config Config
-	Running atomic.Bool
+	Ctx       context.Context
+	Id        NodeId
+	Transport *Transport
+	Running   atomic.Bool
+	Term      Term
+	CancelTimeoutFn func()
 }
 
-func NewNode(ctx context.Context, id int, client *Client, config Config) *Node {
-	return &Node{Ctx: ctx, Id: id, Client: client, Config: config}
+func NewNode(ctx context.Context, id NodeId, transport *Transport) *Node {
+	return &Node{Ctx: ctx, Id: id, Transport: transport}
 }
 
 func (node *Node) Run() error {
@@ -75,11 +113,13 @@ func (node *Node) Run() error {
 
 	for {
 		select {
-			case <- node.Ctx.Done() : {
+		case <-node.Ctx.Done():
+			{
 				err := node.Shutdown()
-				return err		
+				return err
 			}
-			case msg := <- node.Client.Read() : {
+		case msg := <-node.Transport.Read(node.Id):
+			{
 				err := node.Process(msg)
 				if err != nil {
 					return err
@@ -88,17 +128,64 @@ func (node *Node) Run() error {
 		}
 	}
 
-	
 }
 
 func (node *Node) Process(msg Message) error {
 	log(node, "process %v", msg)
+	switch msg.Kind {
+		case VoteRequest:
+			log(node, "getting a vote request from %v", msg.Sender)
+			break
+		case Ping:
+			log(node, "ping")
+			node.SetTimeout(time.Second, func() {
+				node.Send(Pong, msg.Sender, nil)
+			})
+			break
+		case Pong:
+			log(node, "pong")
+			node.SetTimeout(time.Second, func() {
+				node.Send(Ping, msg.Sender, nil)
+			})
+			break
+
+	}
 	return nil
+}
+
+func (node *Node) Send(kind MessageKind, reciver NodeId, payload any) {
+	log(node, "send message of kind %v to %v", kind, reciver)
+	node.Transport.Write(Message{
+		kind, node.Term, node.Id, reciver, payload,
+	})
+}
+
+func (node *Node) SetTimeout(duration time.Duration, callback func()) {
+	node.CancelTimeout()
+	node.CancelTimeoutFn = NewTimeout(node.Ctx, duration, callback)
+}
+
+func (node *Node) CancelTimeout() {
+	if node.CancelTimeoutFn != nil {
+		node.CancelTimeoutFn()
+		node.CancelTimeoutFn = nil
+	}
 }
 
 func (node *Node) Shutdown() error {
 	log(node, "shutdown")
 	return nil
+}
+
+func NewTimeout(ctx context.Context, duration time.Duration, callback func()) func() {
+	internalCtx, cancel := context.WithTimeout(ctx, duration)
+	go func() {
+		<-internalCtx.Done()
+		if internalCtx.Err() == context.DeadlineExceeded {
+			callback()
+		}
+	}()
+	return cancel
 }
 
 func log(node *Node, msg string, args ...any) {
