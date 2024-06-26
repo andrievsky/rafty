@@ -4,196 +4,103 @@ import (
 	"fmt"
 	"context"
 	"time"
+	"sync/atomic"
 )
 
 func main() {
 	fmt.Println("Lets RAFT!")
-	network := Network{}
+	
 	ctx, cancel := context.WithCancel(context.Background())
-	node := NewNode(ctx, 1, network)
-	node.Init()
-	node.Run()
+	config := Config{}
+	client := NewClient()
 
-	time.Sleep(time.Second)
+	node := NewNode(ctx, 1, client, config)
+
+	go func() {
+		err := node.Run()
+		if err != nil {
+			log(node, "terminated with error %w", err)
+			return
+		}
+		log(node, "terminated")
+		
+	}()
+
+	client.Write(Message("hello peer!"))
+
+	time.Sleep(1 * time.Second)
 	cancel()
+	time.Sleep(3 * time.Second)
 }
-
-type NodeID int
 
 type Config struct {
-	Nodes []int
-}
-
-type Network struct {
-	Cnf Config
-	//Bus MessageBus
-}
-
-type Message struct {
-	Command Command
-	Sender NodeID
-	Reciever NodeID
-}
-
-const PromoteLeaderCommand = "PROMOTE LEADER"
-const HeartBeatCommand = "HEART BEAT"
-type Command struct {
-	Type string
-	Data any
-}
-
-func (t Network) Broadcast(msg Message) {
 	
 }
 
-func (t Network) Pull() Message {
-	time.Sleep(6 * time.Second)
-	return (Message{Command{"test", "message"}, 0, 1})
+type Client struct {
+	Channel chan Message	
 }
 
-type Term struct {
-	Gen int
-	Before int
-	Leader NodeID
+type Message string
+
+func NewClient() *Client {
+	return &Client{make(chan Message)}
+}
+
+func (client *Client) Read() <-chan Message {
+	return client.Channel
+}
+
+func (client *Client) Write(msg Message) {
+	client.Channel <- msg
 }
 
 type Node struct {
 	Ctx context.Context
-	Term Term
-	Network Network
-	State *State
-	Timeout Timeout
+	Id int
+	Client *Client
+	Config Config
+	Running atomic.Bool
 }
 
-func NewNode(ctx context.Context, id NodeID, network Network) *Node {
-	term := Term{}
-	node := &Node{ctx, term, network, nil, Timeout{}}
-	var leaderState *State
-	var promoteState *State
-	initState := NewState(id, "init", 
-		func() {
-			node.ChangeStateWithTimeout(promoteState, 3 * time.Second)
-		},
-		func(msg Message) {
-			node.ChangeState(leaderState)
-		},
-		func() {
-		},
-	)
-	promoteState = NewState(id, "promote", 
-		func() {
-		},
-		func(msg Message) {
-			node.ChangeState(leaderState)
-		},
-		func() {
-		},
-	)
-	leaderState = NewState(id, "leader", 
-		func() {
-		},
-		func(msg Message) {
-		},
-		func() {
-		},
-	)
-	node.State = initState
-	return node
+func NewNode(ctx context.Context, id int, client *Client, config Config) *Node {
+	return &Node{Ctx: ctx, Id: id, Client: client, Config: config}
 }
 
-func (node *Node) Init() {
-	node.State.Enter()
-}
+func (node *Node) Run() error {
+	log(node, "run")
+	if node.Running.Swap(true) {
+		return fmt.Errorf("node %s is already running", node.Id)
+	}
 
-func (node *Node) Run() {
-	messageChan := NewMessageChan(node.Network)
 	for {
 		select {
-			case  <- node.Ctx.Done() : node.Shutdown()
-			case  <- node.Timeout.Ctx.Done() : {
-				if node.Timeout.Ctx.Err() == context.DeadlineExceeded {
-					node.ChangeState(node.Timeout.Next)
+			case <- node.Ctx.Done() : {
+				err := node.Shutdown()
+				return err		
+			}
+			case msg := <- node.Client.Read() : {
+				err := node.Process(msg)
+				if err != nil {
+					return err
 				}
 			}
-			case msg := <- messageChan : node.State.Process(msg)
 		}
-	}	
-}
-
-func (node *Node) ChangeState(next *State) {
-	node.State.Exit()
-	node.Timeout.Cancel()
-	node.Timeout.Ctx = context.Background()
-	node.Timeout.Cancel = func(){}
-	node.Timeout.Next = nil
-	node.State = next
-	node.State.Enter()
-}
-
-func (node *Node) ChangeStateWithTimeout(next *State, timeout time.Duration) {
-	if next == nil {
-		panic("fallback state shouln not be empty")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	node.Timeout.Ctx = ctx
-	node.Timeout.Cancel = cancel
-	node.Timeout.Next = next
+
+	
 }
 
-func (node Node) Shutdown() {
+func (node *Node) Process(msg Message) error {
+	log(node, "process %v", msg)
+	return nil
 }
 
-type EnterFn func()
-type ProcessFn func(Message)
-type ExitFn func()
-
-func NewState(id NodeID, name string, enter EnterFn, process ProcessFn, exit ExitFn) *State {
-	return &State{id, name, enter, process, exit}
+func (node *Node) Shutdown() error {
+	log(node, "shutdown")
+	return nil
 }
 
-type State struct {
-	id NodeID
-	name string
-	enter EnterFn
-	process ProcessFn
-	exit ExitFn
-}
-
-func (t State) Enter() {
-	log(t.id, t.name, "enter")
-	t.enter()
-}
-
-
-func (t State) Process(msg Message) {
-	log(t.id, t.name, fmt.Sprintf("got message %v", msg))
-	t.process(msg)
-}
-
-
-func (t State) Exit() {
-	log(t.id, t.name, "exit")
-	t.exit()
-}
-
-func log(id NodeID, state string, msg string) {
-	fmt.Printf("node %v (%s): %s\n", id, state, msg)
-}
-
-type Timeout struct {
-	Ctx context.Context
-	Cancel func()
-	Next *State
-}
-
-
-func NewMessageChan(network Network) <- chan  Message {
-	out := make(chan Message)
-	go func() {
-		for {
-			msg := network.Pull()
-			out <- msg
-		}
-	}()
-	return out
+func log(node *Node, msg string, args ...any) {
+	fmt.Printf("node %v: %s\n", node.Id, fmt.Sprintf(msg, args...))
 }
