@@ -9,25 +9,11 @@ import (
 
 func main() {
 	fmt.Println("Lets RAFT!")
-
-	ctx, cancel := context.WithCancel(context.Background())
 	config := Config{Nodes: []NodeId{1, 2}}
-	transport := NewTransport(config)
-	for _, nodeId := range config.Nodes {
-		node := NewNode(ctx, nodeId, transport)
-		go func() {
-			err := node.Run()
-			if err != nil {
-				log(node, "terminated with error %w", err)
-				return
-			}
-			log(node, "terminated")
-
-		}()
-
-	}
-
-	transport.Write(Message{
+	ctx, cancel := context.WithCancel(context.Background())
+	cluster := NewCluster(ctx, config)
+	cluster.Run()
+	cluster.Transport.Write(Message{
 		Ping,
 		Term{1, 0},
 		1,
@@ -35,9 +21,40 @@ func main() {
 		nil,
 	})
 
-	time.Sleep(10 * time.Second)
+	time.Sleep(20 * time.Second)
 	cancel()
 	time.Sleep(3 * time.Second)
+}
+
+type Cluster struct {
+	Transport *Transport
+	Nodes map[NodeId] *Node
+} 
+
+func NewCluster(ctx context.Context, config Config) *Cluster {
+	transport := NewTransport(config)
+	nodes := make(map[NodeId] *Node)
+	for _, nodeId := range config.Nodes {
+		nodes[nodeId] = NewNode(ctx, nodeId, transport)
+	}
+	return &Cluster{transport, nodes}
+}
+
+func (cluster *Cluster) Run() {
+	for _, node := range cluster.Nodes {
+		cluster.RunNode(node)
+	}
+}
+
+func (cluster *Cluster) RunNode(node *Node) {
+	go func() {
+		err := node.Run()
+		if err != nil {
+			log(node, "terminated with error %v", err)
+			return
+		}
+		log(node, "terminated")
+	}()
 }
 
 type MessageKind int
@@ -108,7 +125,7 @@ func NewNode(ctx context.Context, id NodeId, transport *Transport) *Node {
 func (node *Node) Run() error {
 	log(node, "run")
 	if node.Running.Swap(true) {
-		return fmt.Errorf("node %s is already running", node.Id)
+		return fmt.Errorf("node %v is already running", node.Id)
 	}
 
 	for {
