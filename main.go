@@ -98,7 +98,7 @@ type Message struct {
 	Kind     MessageKind
 	Term     Term
 	Sender   NodeId
-	Reciever NodeId
+	Receiver NodeId
 	Payload  any
 }
 
@@ -123,7 +123,7 @@ func NewTransport(config Config) *Transport {
 }
 
 func (transport *Transport) Write(msg Message) {
-	transport.Channels[msg.Reciever] <- msg
+	transport.Channels[msg.Receiver] <- msg
 }
 
 func (transport *Transport) Read(nodeId NodeId) <-chan Message {
@@ -138,7 +138,7 @@ type Node struct {
 	Ctx             context.Context
 	Id              NodeId
 	Transport       *Transport
-	Running         atomic.Bool // TODO Change to Status?
+	Running         atomic.Bool
 	Term            Term
 	Next            Term
 	CancelTimeoutFn func()
@@ -178,22 +178,10 @@ func (node *Node) Process(msg Message) error {
 	log(node, "process %s: %v", prettyMessageKind(msg.Kind), msg)
 	switch msg.Kind {
 	case VoteRequest:
-		if !node.Term.Valid() {
-			node.Send(VoteResponse, msg.Sender, msg.Payload)
-		}
+		node.VoteRequest(msg)
 		break
 	case VoteResponse:
-		if msg.Term.Id != node.Term.Id {
-			break
-		}
-		node.VoteCounter++
-		if node.VoteCounter > len(node.Transport.Config.Nodes)/2 {
-			log(node, "consensus reached")
-			node.VoteCounter = 0
-			node.Term = msg.Payload.(Term)
-			node.Broadcast(NewLeader, msg.Payload)
-			node.NewLeader(msg.Payload.(Term))
-		}
+		node.VoteResponse(msg)
 		break
 	case NewLeader:
 		node.NewLeader(msg.Payload.(Term))
@@ -206,9 +194,28 @@ func (node *Node) Process(msg Message) error {
 			node.Send(Pong, msg.Sender, nil)
 		})
 		break
-
 	}
 	return nil
+}
+
+func (node *Node) VoteRequest(msg Message) {
+	if !node.Term.Valid() {
+		node.Send(VoteResponse, msg.Sender, msg.Payload)
+	}
+}
+
+func (node *Node) VoteResponse(msg Message) {
+	if msg.Term.Id != node.Term.Id {
+		return
+	}
+	node.VoteCounter++
+	if node.VoteCounter > len(node.Transport.Config.Nodes)/2 {
+		log(node, "consensus reached")
+		node.VoteCounter = 0
+		node.Term = msg.Payload.(Term)
+		node.Broadcast(NewLeader, msg.Payload)
+		node.NewLeader(msg.Payload.(Term))
+	}
 }
 
 func (node *Node) NewLeader(term Term) {
@@ -249,10 +256,10 @@ func (node *Node) StartNextTerm() {
 	})
 }
 
-func (node *Node) Send(kind MessageKind, reciver NodeId, payload any) {
-	log(node, "send message %s to %v", prettyMessageKind(kind), reciver)
+func (node *Node) Send(kind MessageKind, receiver NodeId, payload any) {
+	log(node, "send message %s to %v", prettyMessageKind(kind), receiver)
 	node.Transport.Write(Message{
-		kind, node.Term, node.Id, reciver, payload,
+		kind, node.Term, node.Id, receiver, payload,
 	})
 }
 
