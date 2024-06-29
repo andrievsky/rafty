@@ -1,3 +1,5 @@
+[![Stand With Ukraine](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/badges/StandWithUkraine.svg)](https://stand-with-ukraine.pp.ua)
+
 RAFTY
 =====
 
@@ -10,6 +12,3 @@ I had a few goals in mind:
 * Go back in time for 20 years and write code using only a terminal without autocompletion, refactoring, and other IDE features.
 
 All goals have been achieved. 😊
-
-
-[![Stand With Ukraine](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/badges/StandWithUkraine.svg)](https://stand-with-ukraine.pp.ua)
